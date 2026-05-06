@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import base64
 import asyncio
@@ -8,6 +7,7 @@ import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
+from supabase import create_client, Client
 
 from prompt import SYSTEM_PROMPT
 
@@ -17,20 +17,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Environment variables ─────────────────────────────────────
+
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY')
-NVIDIA_MODEL = os.getenv('NVIDIA_MODEL', 'mistralai/mistral-large-3-675b-instruct-2512')
-BOT_MODE = os.getenv('BOT_MODE', 'start').strip().lower()
+NVIDIA_API_KEY     = os.getenv('NVIDIA_API_KEY')
+NVIDIA_MODEL       = os.getenv('NVIDIA_MODEL', 'mistralai/mistral-large-3-675b-instruct-2512')
+BOT_MODE           = os.getenv('BOT_MODE', 'start').strip().lower()
+SUPABASE_URL       = os.getenv('SUPABASE_URL')
+SUPABASE_KEY       = os.getenv('SUPABASE_KEY')
 
 if not TELEGRAM_BOT_TOKEN or not NVIDIA_API_KEY:
-    raise ValueError("Missing required environment variables: TELEGRAM_BOT_TOKEN and NVIDIA_API_KEY")
+    raise ValueError("Missing: TELEGRAM_BOT_TOKEN or NVIDIA_API_KEY")
 
-# Media group batching
-pending_groups = {}
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Missing: SUPABASE_URL or SUPABASE_KEY")
+
+# ── Supabase client ───────────────────────────────────────────
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ── Media group batching ──────────────────────────────────────
+
+pending_groups   = {}
 scheduled_groups = set()
 
-# Users file — Railway mein /tmp use karo (writable)
-USERS_FILE = '/tmp/listo_users.json'
+# ── Messages ──────────────────────────────────────────────────
 
 MAINTENANCE_MESSAGE = (
     "🔧 LISTO Bot — Maintenance Mode\n\n"
@@ -48,28 +59,28 @@ ACTIVE_MESSAGE = (
 )
 
 
-# ── User storage ──────────────────────────────────────────────
-
-def load_users() -> set:
-    """Saved users ka set load karo."""
-    try:
-        with open(USERS_FILE, 'r') as f:
-            return set(json.load(f))
-    except Exception:
-        return set()
-
+# ── Supabase helpers ──────────────────────────────────────────
 
 def save_user(chat_id: int) -> None:
-    """Naye user ko file mein save karo."""
-    users = load_users()
-    if chat_id not in users:
-        users.add(chat_id)
-        try:
-            with open(USERS_FILE, 'w') as f:
-                json.dump(list(users), f)
-            logger.info(f"New user saved: {chat_id} | Total users: {len(users)}")
-        except Exception as e:
-            logger.error(f"User save failed: {e}")
+    """User ko Supabase mein save karo — duplicate ignore karo."""
+    try:
+        supabase.table('listo_users').upsert(
+            {'chat_id': chat_id},
+            on_conflict='chat_id'
+        ).execute()
+        logger.info(f"User saved/updated: {chat_id}")
+    except Exception as e:
+        logger.error(f"Supabase save_user error: {e}")
+
+
+def load_all_users() -> list[int]:
+    """Supabase se sabhi chat_id load karo."""
+    try:
+        result = supabase.table('listo_users').select('chat_id').execute()
+        return [row['chat_id'] for row in result.data]
+    except Exception as e:
+        logger.error(f"Supabase load_all_users error: {e}")
+        return []
 
 
 def is_maintenance() -> bool:
@@ -79,25 +90,25 @@ def is_maintenance() -> bool:
 # ── Broadcast ─────────────────────────────────────────────────
 
 async def broadcast_active(app: Application) -> None:
-    """Sabhi saved users ko 'bot active' message bhejo."""
-    users = load_users()
+    """Sabhi Supabase users ko 'bot active' message bhejo."""
+    users = load_all_users()
     if not users:
-        logger.info("No saved users — broadcast skip")
+        logger.info("No users in Supabase — broadcast skip")
         return
 
-    logger.info(f"Broadcasting to {len(users)} users...")
+    logger.info(f"Broadcasting ACTIVE message to {len(users)} users...")
     success, failed = 0, 0
 
     for chat_id in users:
         try:
             await app.bot.send_message(chat_id=chat_id, text=ACTIVE_MESSAGE)
             success += 1
-            await asyncio.sleep(0.05)  # rate limit se bachne ke liye
+            await asyncio.sleep(0.05)  # Telegram rate limit se bachne ke liye
         except Exception as e:
             logger.error(f"Broadcast failed for {chat_id}: {e}")
             failed += 1
 
-    logger.info(f"Broadcast done — success: {success}, failed: {failed}")
+    logger.info(f"Broadcast done — success: {success} | failed: {failed}")
 
 
 # ── Handlers ──────────────────────────────────────────────────
@@ -136,7 +147,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     file_id = update.message.photo[-1].file_id
 
     if media_group_id:
-        logger.info(f"Received photo with media_group_id: {media_group_id}")
+        logger.info(f"Batch photo received: {media_group_id}")
         if media_group_id not in pending_groups:
             pending_groups[media_group_id] = []
         pending_groups[media_group_id].append(file_id)
@@ -159,7 +170,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(
         "📸 BGMI account ka screenshot bhejo — main listing bana dunga!"
     )
-    logger.info(f"User {chat_id} sent text message")
+    logger.info(f"User {chat_id} sent text")
 
 
 # ── Photo processing ───────────────────────────────────────────
@@ -173,7 +184,7 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
         return
 
     total = len(file_ids)
-    logger.info(f"Processing batch {media_group_id} with {total} photos")
+    logger.info(f"Processing batch {media_group_id} — {total} photos")
 
     try:
         status_msg = await context.bot.send_message(
@@ -184,12 +195,12 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
         base64_images = []
         for i, file_id in enumerate(file_ids, 1):
             try:
-                file_info = await context.bot.get_file(file_id)
+                file_info   = await context.bot.get_file(file_id)
                 photo_bytes = await file_info.download_as_bytearray()
                 base64_images.append(base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8'))
-                logger.info(f"Downloaded photo {i}/{total}")
+                logger.info(f"Downloaded {i}/{total}")
             except Exception as e:
-                logger.error(f"Error downloading photo {i}: {e}")
+                logger.error(f"Download error photo {i}: {e}")
 
         if not base64_images:
             await context.bot.send_message(chat_id=chat_id, text="❌ Screenshots download nahi ho sake. Dobara try karo.")
@@ -212,7 +223,7 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
         await send_listing(context, chat_id, listing)
 
     except Exception as e:
-        logger.error(f"Unexpected batch error: {e}")
+        logger.error(f"Batch unexpected error: {e}")
         try:
             await context.bot.send_message(chat_id=chat_id, text="❌ Kuch error aaya. Dobara try karo.")
         except TelegramError:
@@ -221,18 +232,17 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
 
 async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        processing_msg = await update.message.reply_text("⏳ Screenshot analyze ho raha hai... thoda wait karo")
-
-        photo_file = await update.message.photo[-1].get_file()
+        status_msg  = await update.message.reply_text("⏳ Screenshot analyze ho raha hai... thoda wait karo")
+        photo_file  = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         base64_image = base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8')
 
-        logger.info(f"Single photo downloaded: {len(photo_bytes)} bytes")
+        logger.info(f"Single photo: {len(photo_bytes)} bytes")
 
         listing = await analyze_image_with_nvidia([base64_image])
 
         try:
-            await processing_msg.delete()
+            await status_msg.delete()
         except TelegramError:
             pass
 
@@ -247,13 +257,13 @@ async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def send_listing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing: str) -> None:
+    """Listing bhejo — 4096 char se badi ho toh split karo."""
     max_len = 4096
     if len(listing) <= max_len:
         await context.bot.send_message(chat_id=chat_id, text=listing, parse_mode='HTML')
         return
 
-    sections = listing.split('\n\n')
-    current = ""
+    sections, current = listing.split('\n\n'), ""
     for section in sections:
         if len(current) + len(section) + 2 <= max_len:
             current += section + '\n\n'
@@ -268,7 +278,7 @@ async def send_listing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing
 # ── NVIDIA API ────────────────────────────────────────────────
 
 async def analyze_image_with_nvidia(base64_images: list) -> str:
-    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    url     = "https://integrate.api.nvidia.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
         "Content-Type": "application/json",
@@ -293,9 +303,9 @@ async def analyze_image_with_nvidia(base64_images: list) -> str:
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        data = response.json()
+        data    = response.json()
         listing = data['choices'][0]['message']['content'].strip()
-        logger.info(f"NVIDIA response: {len(listing)} chars for {len(base64_images)} images")
+        logger.info(f"NVIDIA response: {len(listing)} chars | {len(base64_images)} images")
         return listing
 
 
@@ -303,13 +313,13 @@ async def analyze_image_with_nvidia(base64_images: list) -> str:
 
 def main() -> None:
     logger.info("Starting LISTO bot")
-    logger.info(f"NVIDIA model: {NVIDIA_MODEL}")
-    logger.info(f"BOT_MODE: {BOT_MODE.upper()}")
+    logger.info(f"Model  : {NVIDIA_MODEL}")
+    logger.info(f"Mode   : {BOT_MODE.upper()}")
 
     if is_maintenance():
-        logger.info("MAINTENANCE MODE — users will see maintenance message")
+        logger.info("MAINTENANCE MODE active")
     else:
-        logger.info("ACTIVE MODE — normal operation")
+        logger.info("ACTIVE MODE — will broadcast on startup")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -317,7 +327,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # BOT_MODE=start pe broadcast — sabhi purane users ko active message
+    # BOT_MODE=start hone pe sabhi users ko broadcast
     if not is_maintenance():
         async def post_init(app: Application) -> None:
             await broadcast_active(app)
