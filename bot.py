@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import base64
 import asyncio
@@ -10,291 +11,277 @@ from telegram.error import TelegramError
 
 from prompt import SYSTEM_PROMPT
 
-# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY')
 NVIDIA_MODEL = os.getenv('NVIDIA_MODEL', 'mistralai/mistral-large-3-675b-instruct-2512')
+BOT_MODE = os.getenv('BOT_MODE', 'start').strip().lower()
 
 if not TELEGRAM_BOT_TOKEN or not NVIDIA_API_KEY:
     raise ValueError("Missing required environment variables: TELEGRAM_BOT_TOKEN and NVIDIA_API_KEY")
 
-
-# Global dicts for media group batching
-# Format: {media_group_id: [file_id, file_id, ...]}
+# Media group batching
 pending_groups = {}
-# Format: set of media_group_ids already scheduled for processing (one task per group)
 scheduled_groups = set()
 
+# Users file — Railway mein /tmp use karo (writable)
+USERS_FILE = '/tmp/listo_users.json'
+
+MAINTENANCE_MESSAGE = (
+    "🔧 LISTO Bot — Maintenance Mode\n\n"
+    "Abhi bot temporarily offline hai.\n"
+    "Hum kuch improvements aur bug fixes kar rahe hain.\n\n"
+    "Thodi der mein wapas aa jayenge!\n"
+    "Inconvenience ke liye sorry 🙏"
+)
+
+ACTIVE_MESSAGE = (
+    "✅ LISTO Bot — Ab Active Hai!\n\n"
+    "Bot wapas aa gaya hai.\n"
+    "Ab screenshots bhejo aur listing ready ho jayegi!\n\n"
+    "🎮 Screenshot bhejo aur shuru karo"
+)
+
+
+# ── User storage ──────────────────────────────────────────────
+
+def load_users() -> set:
+    """Saved users ka set load karo."""
+    try:
+        with open(USERS_FILE, 'r') as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def save_user(chat_id: int) -> None:
+    """Naye user ko file mein save karo."""
+    users = load_users()
+    if chat_id not in users:
+        users.add(chat_id)
+        try:
+            with open(USERS_FILE, 'w') as f:
+                json.dump(list(users), f)
+            logger.info(f"New user saved: {chat_id} | Total users: {len(users)}")
+        except Exception as e:
+            logger.error(f"User save failed: {e}")
+
+
+def is_maintenance() -> bool:
+    return BOT_MODE == 'stop'
+
+
+# ── Broadcast ─────────────────────────────────────────────────
+
+async def broadcast_active(app: Application) -> None:
+    """Sabhi saved users ko 'bot active' message bhejo."""
+    users = load_users()
+    if not users:
+        logger.info("No saved users — broadcast skip")
+        return
+
+    logger.info(f"Broadcasting to {len(users)} users...")
+    success, failed = 0, 0
+
+    for chat_id in users:
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=ACTIVE_MESSAGE)
+            success += 1
+            await asyncio.sleep(0.05)  # rate limit se bachne ke liye
+        except Exception as e:
+            logger.error(f"Broadcast failed for {chat_id}: {e}")
+            failed += 1
+
+    logger.info(f"Broadcast done — success: {success}, failed: {failed}")
+
+
+# ── Handlers ──────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a welcome message explaining how to use the bot."""
-    welcome_message = """🎮 **Welcome to Galaxy Accounts Bot**
+    chat_id = update.effective_chat.id
+    save_user(chat_id)
 
-I analyze BGMI (Battlegrounds Mobile India) account screenshots and create formatted listings automatically.
+    if is_maintenance():
+        await update.message.reply_text(MAINTENANCE_MESSAGE)
+        return
 
-**How to use:**
-1️⃣ Send me a screenshot of a BGMI account
-2️⃣ I'll extract the stats using AI
-3️⃣ You'll get a formatted listing ready to share
-
-**Supported stats:**
-• UID, Level, Tier & Rank Points
-• K/D Ratio, Matches, Win Rate
-• Inventory items (skins, outfits, vehicles)
-
-Just send a screenshot and I'll do the rest! 📸"""
-    
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
-    logger.info(f"User {update.effective_user.id} started the bot")
+    welcome_message = (
+        "🎮 Welcome to LISTO Bot\n\n"
+        "BGMI account screenshots bhejo — main AI se analyze karke ek ready-to-post listing bana dunga.\n\n"
+        "Kaise use kare:\n"
+        "1. BGMI account ka screenshot bhejo\n"
+        "2. AI stats extract karega\n"
+        "3. Formatted listing turant mil jayegi\n\n"
+        "Multiple screenshots ek saath bhej sakte ho — sab ek listing mein combine ho jayenge.\n\n"
+        "Screenshot bhejo aur shuru karo!"
+    )
+    await update.message.reply_text(welcome_message)
+    logger.info(f"User {chat_id} started LISTO bot")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photo messages - batch multiple photos or process single photo."""
-    media_group_id = update.message.media_group_id
     chat_id = update.effective_chat.id
+    save_user(chat_id)
+
+    if is_maintenance():
+        await update.message.reply_text(MAINTENANCE_MESSAGE)
+        return
+
+    media_group_id = update.message.media_group_id
     file_id = update.message.photo[-1].file_id
-    
+
     if media_group_id:
-        # This photo is part of a batch (multiple photos sent together)
         logger.info(f"Received photo with media_group_id: {media_group_id}")
-        
-        # Always add file_id to pending group
         if media_group_id not in pending_groups:
             pending_groups[media_group_id] = []
         pending_groups[media_group_id].append(file_id)
-        
-        # Only schedule ONE task per media_group_id (use scheduled_groups flag)
+
         if media_group_id not in scheduled_groups:
             scheduled_groups.add(media_group_id)
-            logger.info(f"Scheduled processing for batch {media_group_id}")
             asyncio.create_task(process_group_after_delay(media_group_id, chat_id, context))
-        else:
-            logger.info(f"Batch {media_group_id} already scheduled, added photo #{len(pending_groups[media_group_id])}")
     else:
-        # Single photo (no media group) - process immediately
         await process_single_photo(update, context)
 
 
-async def process_group_after_delay(media_group_id: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Process all photos in a media group batch after waiting for collection."""
-    # Wait 2 seconds for all photos in the group to arrive
-    await asyncio.sleep(2)
-    
-    # Mark as no longer scheduled
-    scheduled_groups.discard(media_group_id)
-    
-    # Get all file_ids for this group
-    file_ids = pending_groups.pop(media_group_id, [])
-    
-    if not file_ids:
-        logger.warning(f"Media group {media_group_id} has no file_ids")
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    save_user(chat_id)
+
+    if is_maintenance():
+        await update.message.reply_text(MAINTENANCE_MESSAGE)
         return
-    
+
+    await update.message.reply_text(
+        "📸 BGMI account ka screenshot bhejo — main listing bana dunga!"
+    )
+    logger.info(f"User {chat_id} sent text message")
+
+
+# ── Photo processing ───────────────────────────────────────────
+
+async def process_group_after_delay(media_group_id: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await asyncio.sleep(2)
+    scheduled_groups.discard(media_group_id)
+    file_ids = pending_groups.pop(media_group_id, [])
+
+    if not file_ids:
+        return
+
     total = len(file_ids)
     logger.info(f"Processing batch {media_group_id} with {total} photos")
-    
+
     try:
-        # Send status message
         status_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏳ {total} screenshot{'s' if total > 1 else ''} analyze ho rahe hain... wait karo"
+            text=f"⏳ {total} screenshot{'s' if total > 1 else ''} analyze ho raha hai... thoda wait karo"
         )
-        
-        # Download all photos and convert to base64 (send all together in one API call)
+
         base64_images = []
         for i, file_id in enumerate(file_ids, 1):
             try:
-                # Download photo
                 file_info = await context.bot.get_file(file_id)
                 photo_bytes = await file_info.download_as_bytearray()
-                base64_image = base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8')
-                base64_images.append(base64_image)
-                logger.info(f"Downloaded photo {i}/{total} from batch {media_group_id}")
-                
+                base64_images.append(base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8'))
+                logger.info(f"Downloaded photo {i}/{total}")
             except Exception as e:
-                logger.error(f"Error downloading photo {i} in batch {media_group_id}: {str(e)}")
-        
+                logger.error(f"Error downloading photo {i}: {e}")
+
         if not base64_images:
-            logger.error(f"Failed to download any photos from batch {media_group_id}")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ **Error downloading screenshots**\nPlease try again"
-            )
+            await context.bot.send_message(chat_id=chat_id, text="❌ Screenshots download nahi ho sake. Dobara try karo.")
             return
-        
-        # Analyze ALL photos together in ONE API call
+
         try:
             listing = await analyze_image_with_nvidia(base64_images)
-            logger.info(f"Analyzed batch {media_group_id} with {len(base64_images)} photos in one call")
         except httpx.HTTPStatusError as e:
-            logger.error(f"NVIDIA NIM API error for batch {media_group_id}: {e.response.status_code}")
-            listing = f"❌ **NVIDIA NIM API Error**\nPlease try again later."
+            logger.error(f"NVIDIA API error: {e.response.status_code}")
+            listing = "❌ AI API error. Thodi der baad dobara try karo."
         except Exception as e:
-            logger.error(f"Error analyzing batch {media_group_id}: {str(e)}")
-            listing = f"❌ **Error analyzing screenshots**\n{str(e)[:80]}"
-        
-        # Delete the status message
+            logger.error(f"Analysis error: {e}")
+            listing = "❌ Screenshot analyze nahi ho saka. Dobara try karo."
+
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         except TelegramError:
             pass
-        
-        # Send single listing (no "Account X of N" headers)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=listing,
-            parse_mode='HTML'
-        )
-        logger.info(f"Sent combined reply for batch {media_group_id} with {total} photos")
-        
+
+        await send_listing(context, chat_id, listing)
+
     except Exception as e:
-        logger.error(f"Unexpected error processing batch {media_group_id}: {str(e)}")
+        logger.error(f"Unexpected batch error: {e}")
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ **Unexpected Error**\n{str(e)[:100]}"
-            )
+            await context.bot.send_message(chat_id=chat_id, text="❌ Kuch error aaya. Dobara try karo.")
         except TelegramError:
-            logger.error(f"Failed to send error message for batch {media_group_id}")
-
-
-async def send_combined_listings(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing: str) -> None:
-    """Send listing to user (split if >4096 chars)."""
-    # Telegram message limit is 4096 chars
-    max_message_length = 4096
-    
-    if len(listing) <= max_message_length:
-        # Single message fits
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=listing,
-            parse_mode='HTML'
-        )
-    else:
-        # Split into multiple messages (break on double newlines to preserve structure)
-        sections = listing.split('\n\n')
-        messages = []
-        current_message = ""
-        
-        for section in sections:
-            if len(current_message) + len(section) + 2 <= max_message_length:
-                current_message += section + '\n\n'
-            else:
-                if current_message:
-                    messages.append(current_message.strip())
-                current_message = section + '\n\n'
-        
-        if current_message:
-            messages.append(current_message.strip())
-        
-        # Send all split messages
-        for msg in messages:
-            if msg:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=msg,
-                    parse_mode='HTML'
-                )
+            pass
 
 
 async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Process a single photo (not part of a batch)."""
     try:
-        # Send processing message
-        processing_msg = await update.message.reply_text("🔄 Analyzing screenshot...")
-        
-        # Download and analyze photo
+        processing_msg = await update.message.reply_text("⏳ Screenshot analyze ho raha hai... thoda wait karo")
+
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         base64_image = base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8')
-        
-        logger.info(f"Downloaded single photo from user {update.effective_user.id}, size: {len(photo_bytes)} bytes")
-        
-        # Get listing from NVIDIA NIM API (pass as list with single image)
+
+        logger.info(f"Single photo downloaded: {len(photo_bytes)} bytes")
+
         listing = await analyze_image_with_nvidia([base64_image])
-        
-        # Delete processing message
+
         try:
             await processing_msg.delete()
         except TelegramError:
             pass
-        
-        # Send the listing
+
         await update.message.reply_text(listing, parse_mode='HTML')
-        logger.info(f"Sent listing to user {update.effective_user.id}")
-        
+
     except httpx.HTTPStatusError as e:
-        logger.error(f"NVIDIA NIM API error for user {update.effective_user.id}: {e.response.status_code}")
-        try:
-            await update.message.reply_text("❌ **NVIDIA NIM API Error**\nPlease try again later.")
-        except TelegramError:
-            pass
-            
+        logger.error(f"NVIDIA API error: {e.response.status_code}")
+        await update.message.reply_text("❌ AI API error. Thodi der baad dobara try karo.")
     except Exception as e:
-        logger.error(f"Error processing single photo for user {update.effective_user.id}: {str(e)}")
-        try:
-            await update.message.reply_text(f"❌ **Error Processing Screenshot**\n{str(e)[:80]}")
-        except TelegramError:
-            pass
+        logger.error(f"Single photo error: {e}")
+        await update.message.reply_text("❌ Screenshot analyze nahi ho saka. Dobara try karo.")
 
 
+async def send_listing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing: str) -> None:
+    max_len = 4096
+    if len(listing) <= max_len:
+        await context.bot.send_message(chat_id=chat_id, text=listing, parse_mode='HTML')
+        return
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text messages - ask user to send a screenshot instead."""
-    response = "📸 Please send a BGMI account screenshot instead of text. I'll analyze it and create a formatted listing for you!"
-    await update.message.reply_text(response)
-    logger.info(f"User {update.effective_user.id} sent text message")
+    sections = listing.split('\n\n')
+    current = ""
+    for section in sections:
+        if len(current) + len(section) + 2 <= max_len:
+            current += section + '\n\n'
+        else:
+            if current:
+                await context.bot.send_message(chat_id=chat_id, text=current.strip(), parse_mode='HTML')
+            current = section + '\n\n'
+    if current:
+        await context.bot.send_message(chat_id=chat_id, text=current.strip(), parse_mode='HTML')
 
+
+# ── NVIDIA API ────────────────────────────────────────────────
 
 async def analyze_image_with_nvidia(base64_images: list) -> str:
-    """Send images to NVIDIA NIM API and get formatted listing.
-    
-    Args:
-        base64_images: List of base64-encoded image strings to analyze together
-    
-    Returns:
-        Formatted listing generated by analyzing all images as one account
-    """
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    
     headers = {
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
-    
-    # Build content array with system prompt and all images
-    content = [
-        {
-            "type": "text",
-            "text": SYSTEM_PROMPT
-        }
-    ]
-    
-    # Add each image as separate image_url block
-    for base64_image in base64_images:
-        content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{base64_image}"
-            }
-        })
-    
+
+    content = [{"type": "text", "text": SYSTEM_PROMPT}]
+    for img in base64_images:
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}})
+
     payload = {
         "model": NVIDIA_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": content
-            }
-        ],
+        "messages": [{"role": "user", "content": content}],
         "max_tokens": 4096,
         "temperature": 0.15,
         "top_p": 1.00,
@@ -302,31 +289,40 @@ async def analyze_image_with_nvidia(base64_images: list) -> str:
         "presence_penalty": 0.00,
         "stream": False
     }
-    
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        
         data = response.json()
         listing = data['choices'][0]['message']['content'].strip()
-        logger.info(f"Received response from NVIDIA NIM API: {len(listing)} characters for {len(base64_images)} images")
+        logger.info(f"NVIDIA response: {len(listing)} chars for {len(base64_images)} images")
         return listing
 
 
+# ── Main ──────────────────────────────────────────────────────
+
 def main() -> None:
-    """Start the bot."""
-    logger.info(f"Starting BGMI Account Analyzer bot with NVIDIA NIM API")
-    logger.info(f"Using NVIDIA model: {NVIDIA_MODEL}")
-    
-    # Create the Application
+    logger.info("Starting LISTO bot")
+    logger.info(f"NVIDIA model: {NVIDIA_MODEL}")
+    logger.info(f"BOT_MODE: {BOT_MODE.upper()}")
+
+    if is_maintenance():
+        logger.info("MAINTENANCE MODE — users will see maintenance message")
+    else:
+        logger.info("ACTIVE MODE — normal operation")
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Add handlers
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    # Start the bot
+
+    # BOT_MODE=start pe broadcast — sabhi purane users ko active message
+    if not is_maintenance():
+        async def post_init(app: Application) -> None:
+            await broadcast_active(app)
+        application.post_init = post_init
+
     application.run_polling(drop_pending_updates=True)
 
 
