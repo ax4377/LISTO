@@ -19,16 +19,17 @@ logger = logging.getLogger(__name__)
 
 # ── Environment variables ─────────────────────────────────────
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-NVIDIA_API_KEY     = os.getenv('NVIDIA_API_KEY')
-NVIDIA_MODEL       = os.getenv('NVIDIA_MODEL', 'mistralai/mistral-large-3-675b-instruct-2512')
-BOT_MODE           = os.getenv('BOT_MODE', 'start').strip().lower()
-SUPABASE_URL       = os.getenv('SUPABASE_URL')
-SUPABASE_KEY       = os.getenv('SUPABASE_KEY')
+TELEGRAM_BOT_TOKEN  = os.getenv('TELEGRAM_BOT_TOKEN')
+OPENROUTER_API_KEY  = os.getenv('OPENROUTER_API_KEY')
+OPENROUTER_MODEL    = os.getenv('OPENROUTER_MODEL', 'google/gemma-4-31b-it:free')
+BOT_MODE            = os.getenv('BOT_MODE', 'start').strip().lower()
+SUPABASE_URL        = os.getenv('SUPABASE_URL')
+SUPABASE_KEY        = os.getenv('SUPABASE_KEY')
 
-if not TELEGRAM_BOT_TOKEN or not NVIDIA_API_KEY:
-    raise ValueError("Missing: TELEGRAM_BOT_TOKEN or NVIDIA_API_KEY")
-
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("Missing: TELEGRAM_BOT_TOKEN")
+if not OPENROUTER_API_KEY:
+    raise ValueError("Missing: OPENROUTER_API_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Missing: SUPABASE_URL or SUPABASE_KEY")
 
@@ -68,7 +69,7 @@ def save_user(chat_id: int) -> None:
             {'chat_id': chat_id},
             on_conflict='chat_id'
         ).execute()
-        logger.info(f"User saved/updated: {chat_id}")
+        logger.info(f"User saved: {chat_id}")
     except Exception as e:
         logger.error(f"Supabase save_user error: {e}")
 
@@ -90,13 +91,13 @@ def is_maintenance() -> bool:
 # ── Broadcast ─────────────────────────────────────────────────
 
 async def broadcast_active(app: Application) -> None:
-    """Sabhi Supabase users ko 'bot active' message bhejo."""
+    """Sabhi saved users ko 'bot active' message bhejo."""
     users = load_all_users()
     if not users:
         logger.info("No users in Supabase — broadcast skip")
         return
 
-    logger.info(f"Broadcasting ACTIVE message to {len(users)} users...")
+    logger.info(f"Broadcasting to {len(users)} users...")
     success, failed = 0, 0
 
     for chat_id in users:
@@ -207,9 +208,9 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
             return
 
         try:
-            listing = await analyze_image_with_nvidia(base64_images)
+            listing = await analyze_image_with_openrouter(base64_images)
         except httpx.HTTPStatusError as e:
-            logger.error(f"NVIDIA API error: {e.response.status_code}")
+            logger.error(f"OpenRouter API error: {e.response.status_code} — {e.response.text}")
             listing = "❌ AI API error. Thodi der baad dobara try karo."
         except Exception as e:
             logger.error(f"Analysis error: {e}")
@@ -232,14 +233,14 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
 
 async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        status_msg  = await update.message.reply_text("⏳ Screenshot analyze ho raha hai... thoda wait karo")
-        photo_file  = await update.message.photo[-1].get_file()
-        photo_bytes = await photo_file.download_as_bytearray()
+        status_msg   = await update.message.reply_text("⏳ Screenshot analyze ho raha hai... thoda wait karo")
+        photo_file   = await update.message.photo[-1].get_file()
+        photo_bytes  = await photo_file.download_as_bytearray()
         base64_image = base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8')
 
         logger.info(f"Single photo: {len(photo_bytes)} bytes")
 
-        listing = await analyze_image_with_nvidia([base64_image])
+        listing = await analyze_image_with_openrouter([base64_image])
 
         try:
             await status_msg.delete()
@@ -249,7 +250,7 @@ async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(listing, parse_mode='HTML')
 
     except httpx.HTTPStatusError as e:
-        logger.error(f"NVIDIA API error: {e.response.status_code}")
+        logger.error(f"OpenRouter API error: {e.response.status_code} — {e.response.text}")
         await update.message.reply_text("❌ AI API error. Thodi der baad dobara try karo.")
     except Exception as e:
         logger.error(f"Single photo error: {e}")
@@ -275,29 +276,30 @@ async def send_listing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing
         await context.bot.send_message(chat_id=chat_id, text=current.strip(), parse_mode='HTML')
 
 
-# ── NVIDIA API ────────────────────────────────────────────────
+# ── OpenRouter API ────────────────────────────────────────────
 
-async def analyze_image_with_nvidia(base64_images: list) -> str:
-    url     = "https://integrate.api.nvidia.com/v1/chat/completions"
+async def analyze_image_with_openrouter(base64_images: list) -> str:
+    """OpenRouter ke free vision model se images analyze karo."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "HTTP-Referer": "https://github.com/listo-bot",
+        "X-Title": "LISTO Bot",
     }
 
     content = [{"type": "text", "text": SYSTEM_PROMPT}]
     for img in base64_images:
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{img}"}
+        })
 
     payload = {
-        "model": NVIDIA_MODEL,
+        "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 4096,
         "temperature": 0.15,
-        "top_p": 1.00,
-        "frequency_penalty": 0.00,
-        "presence_penalty": 0.00,
-        "stream": False
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -305,7 +307,7 @@ async def analyze_image_with_nvidia(base64_images: list) -> str:
         response.raise_for_status()
         data    = response.json()
         listing = data['choices'][0]['message']['content'].strip()
-        logger.info(f"NVIDIA response: {len(listing)} chars | {len(base64_images)} images")
+        logger.info(f"OpenRouter response: {len(listing)} chars | model: {OPENROUTER_MODEL} | images: {len(base64_images)}")
         return listing
 
 
@@ -313,7 +315,7 @@ async def analyze_image_with_nvidia(base64_images: list) -> str:
 
 def main() -> None:
     logger.info("Starting LISTO bot")
-    logger.info(f"Model  : {NVIDIA_MODEL}")
+    logger.info(f"Model  : {OPENROUTER_MODEL}")
     logger.info(f"Mode   : {BOT_MODE.upper()}")
 
     if is_maintenance():
