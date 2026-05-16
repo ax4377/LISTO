@@ -26,7 +26,7 @@ FREEMODEL_MODEL     = os.getenv('FREEMODEL_MODEL', 'google/gemma-4-31b-it:free')
 BOT_MODE            = os.getenv('BOT_MODE', 'start').strip().lower()
 SUPABASE_URL        = os.getenv('SUPABASE_URL')
 SUPABASE_KEY        = os.getenv('SUPABASE_KEY')
-BOT_USERNAME        = os.getenv('BOT_USERNAME', 'YourBotUsername')  # e.g. ListoBot (without @)
+BOT_USERNAME        = os.getenv('BOT_USERNAME', 'ListoAIbot')  # e.g. ListoBot (without @)
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("Missing: TELEGRAM_BOT_TOKEN")
@@ -39,6 +39,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 DAILY_FREE_LIMIT  = 3    # Base free uses per day
 REFERRAL_BONUS    = 5    # Bonus uses referrer ko milega
+ADMIN_IDS         = {1787566342}  # Unlimited uses — no restrictions
 IST               = timezone(timedelta(hours=5, minutes=30))
 
 # ── Supabase client ───────────────────────────────────────────
@@ -54,36 +55,37 @@ scheduled_groups = set()
 
 MAINTENANCE_MESSAGE = (
     "🔧 LISTO Bot — Maintenance Mode\n\n"
-    "Abhi bot temporarily offline hai.\n"
-    "Hum kuch improvements aur bug fixes kar rahe hain.\n\n"
-    "Thodi der mein wapas aa jayenge!\n"
-    "Inconvenience ke liye sorry 🙏"
+    "The bot is temporarily offline.\n"
+    "We're working on improvements and bug fixes.\n\n"
+    "We'll be back shortly!\n"
+    "Sorry for the inconvenience 🙏"
 )
 
 ACTIVE_MESSAGE = (
-    "✅ LISTO Bot — Ab Active Hai!\n\n"
-    "Bot wapas aa gaya hai.\n"
-    "Ab screenshots bhejo aur listing ready ho jayegi!\n\n"
-    "🎮 Screenshot bhejo aur shuru karo"
+    "✅ LISTO Bot — Back Online!\n\n"
+    "The bot is back up and running.\n"
+    "Send your screenshots and get your listing ready!\n\n"
+    "🎮 Send a screenshot to get started"
 )
+
 
 
 # ── IST helpers ───────────────────────────────────────────────
 
 def get_ist_today() -> str:
-    """Aaj ki IST date string return karo (YYYY-MM-DD)."""
+    """Return today's IST date string (YYYY-MM-DD)."""
     return datetime.now(IST).strftime('%Y-%m-%d')
 
 
 def seconds_until_midnight_ist() -> int:
-    """IST midnight tak kitne seconds bacha hai."""
+    """Return seconds until IST midnight."""
     now = datetime.now(IST)
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return int((midnight - now).total_seconds())
 
 
 def format_countdown(seconds: int) -> str:
-    """Seconds ko HH:MM:SS format mein convert karo."""
+    """Convert seconds to HH:MM:SS format."""
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
@@ -93,17 +95,14 @@ def format_countdown(seconds: int) -> str:
 # ── Supabase helpers ──────────────────────────────────────────
 
 def save_user(chat_id: int, referred_by: int = None) -> bool:
-    """
-    User ko Supabase mein save karo.
-    Returns True agar naya user hai, False agar already exist karta hai.
-    """
+    """Save user to Supabase. Returns True if new user, False if already exists."""
     try:
-        # Pehle check karo user exist karta hai ya nahi
+        # Check if user already exists
         result = supabase.table('listo_users').select('chat_id').eq('chat_id', chat_id).execute()
         if result.data:
             return False  # Already exist karta hai
 
-        # Naya user insert karo
+        # Insert new user
         data = {
             'chat_id': chat_id,
             'daily_count': 0,
@@ -121,7 +120,7 @@ def save_user(chat_id: int, referred_by: int = None) -> bool:
 
 
 def load_all_users() -> list[int]:
-    """Supabase se sabhi chat_id load karo."""
+    """Load all chat_ids from Supabase."""
     try:
         result = supabase.table('listo_users').select('chat_id').execute()
         return [row['chat_id'] for row in result.data]
@@ -131,7 +130,7 @@ def load_all_users() -> list[int]:
 
 
 def get_user(chat_id: int) -> dict | None:
-    """User ka full record fetch karo."""
+    """Fetch full user record."""
     try:
         result = supabase.table('listo_users').select('*').eq('chat_id', chat_id).execute()
         return result.data[0] if result.data else None
@@ -141,7 +140,7 @@ def get_user(chat_id: int) -> dict | None:
 
 
 def get_users_with_exhausted_limit() -> list[dict]:
-    """Aaj jinki limit khatam ho gayi thi unhe fetch karo (reset notification ke liye)."""
+    """Fetch users whose daily limit was exhausted today (for reset notification)."""
     try:
         today = get_ist_today()
         result = supabase.table('listo_users').select('chat_id, daily_count, bonus_uses').eq('last_used_date', today).execute()
@@ -163,12 +162,15 @@ def check_and_use_limit(chat_id: int) -> dict:
       {'allowed': True, 'remaining': N}  — use allowed
       {'allowed': False, 'reset_in': seconds, 'countdown': 'HH:MM:SS'}  — limit khatam
     """
+    # Admin — unlimited, no restrictions
+    if chat_id in ADMIN_IDS:
+        return {'allowed': True, 'remaining': 999}
+
     try:
         today = get_ist_today()
         user  = get_user(chat_id)
 
         if not user:
-            # User exist nahi karta, create karo
             save_user(chat_id)
             user = get_user(chat_id)
 
@@ -177,7 +179,7 @@ def check_and_use_limit(chat_id: int) -> dict:
         bonus_uses   = user.get('bonus_uses', 0)
         total_limit  = DAILY_FREE_LIMIT + bonus_uses
 
-        # Naya din — count reset karo
+        # New day — reset count
         if last_date != today:
             daily_count = 0
             bonus_uses  = 0
@@ -196,7 +198,7 @@ def check_and_use_limit(chat_id: int) -> dict:
                 'countdown': format_countdown(secs),
             }
 
-        # Use count badhao
+        # Increment use count
         new_count = daily_count + 1
         supabase.table('listo_users').update({
             'daily_count': new_count,
@@ -210,19 +212,19 @@ def check_and_use_limit(chat_id: int) -> dict:
 
     except Exception as e:
         logger.error(f"check_and_use_limit error: {e}")
-        # Error pe allow karo (fail open)
+        # On error, fail open (allow usage)
         return {'allowed': True, 'remaining': 0}
 
 
 def apply_referral_bonus(referrer_chat_id: int) -> None:
-    """Referrer ko +5 bonus uses do aaj ke liye."""
+    """Give referrer +5 bonus uses for today."""
     try:
         today = get_ist_today()
         user  = get_user(referrer_chat_id)
         if not user:
             return
 
-        # Agar aaj use nahi kiya toh pehle reset ensure karo
+        # If not used today, reset first
         last_date = user.get('last_used_date')
         if last_date != today:
             supabase.table('listo_users').update({
@@ -236,7 +238,7 @@ def apply_referral_bonus(referrer_chat_id: int) -> None:
                 'bonus_uses': current_bonus + REFERRAL_BONUS,
             }).eq('chat_id', referrer_chat_id).execute()
 
-        # Referral count bhi badhao
+        # Increment referral count
         ref_count = user.get('referral_count', 0)
         supabase.table('listo_users').update({
             'referral_count': ref_count + 1,
@@ -259,12 +261,12 @@ def is_broadcast_enabled() -> bool:
 
 def limit_exceeded_message(chat_id: int, countdown: str) -> str:
     return (
-        f"⛔ Aaj ki limit khatam ho gayi!\n\n"
+        f"⛔ You've reached today's limit!\n\n"
         f"🔄 Reset hoga: <b>{countdown}</b> mein (raat 12 baje IST)\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💡 Zyada uses chahiye? Dosto ko refer karo!\n"
-        f"Har referral pe <b>+{REFERRAL_BONUS} bonus uses</b> milenge aaj ke liye.\n\n"
-        f"🔗 Tera referral link:\n"
+        f"💡 Want more uses? Refer your friends!\n"
+        f"Get <b>+{REFERRAL_BONUS} bonus uses</b> for each referral today.\n\n"
+        f"🔗 Your referral link:\n"
         f"<code>https://t.me/{BOT_USERNAME}?start=ref_{chat_id}</code>"
     )
 
@@ -272,7 +274,7 @@ def limit_exceeded_message(chat_id: int, countdown: str) -> str:
 # ── Broadcast ─────────────────────────────────────────────────
 
 async def broadcast_active(app: Application) -> None:
-    """Sabhi saved users ko 'bot active' message bhejo."""
+    """Send 'bot active' message to all saved users."""
     users = load_all_users()
     if not users:
         logger.info("No users in Supabase — broadcast skip")
@@ -294,10 +296,7 @@ async def broadcast_active(app: Application) -> None:
 
 
 async def broadcast_reset_notification(app: Application) -> None:
-    """
-    Raat 12 baje jinki limit khatam thi unhe reset notification bhejo
-    saath mein referral link bhi.
-    """
+    """Send midnight reset notification to users whose limit was exhausted."""
     exhausted_users = get_users_with_exhausted_limit()
     if not exhausted_users:
         logger.info("No exhausted users — reset broadcast skip")
@@ -309,14 +308,14 @@ async def broadcast_reset_notification(app: Application) -> None:
     for user in exhausted_users:
         chat_id = user['chat_id']
         msg = (
-            f"🌅 Naya din, nayi shuruat!\n\n"
-            f"✅ Teri daily limit reset ho gayi hai.\n"
-            f"Ab phir se <b>{DAILY_FREE_LIMIT} free uses</b> available hain.\n\n"
-            f"🎮 Screenshot bhejo aur listing banao!\n\n"
+            f"🌅 New day, fresh start!\n\n"
+            f"✅ Your daily limit has been reset.\n"
+            f"You now have <b>{DAILY_FREE_LIMIT} free uses</b> available.\n\n"
+            f"🎮 Send a screenshot and create your listing!\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"💡 Zyada uses chahiye? Dosto ko refer karo!\n"
-            f"Har referral pe <b>+{REFERRAL_BONUS} bonus uses</b> milenge.\n\n"
-            f"🔗 Tera referral link:\n"
+            f"💡 Want more uses? Refer your friends!\n"
+            f"Get <b>+{REFERRAL_BONUS} bonus uses</b> per referral.\n\n"
+            f"🔗 Your referral link:\n"
             f"<code>https://t.me/{BOT_USERNAME}?start=ref_{chat_id}</code>"
         )
         try:
@@ -364,9 +363,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await app_ref.bot.send_message(
                 chat_id=referred_by,
                 text=(
-                    f"🎉 Ek dost ne tera referral link use kiya!\n\n"
-                    f"✅ Tujhe <b>+{REFERRAL_BONUS} bonus uses</b> mil gaye aaj ke liye.\n\n"
-                    f"Aur refer karo, aur uses pao! 🚀"
+                    f"🎉 Someone joined using your referral link!\n\n"
+                    f"✅ You've received <b>+{REFERRAL_BONUS} bonus uses</b> for today.\n\n"
+                    f"Keep referring, keep earning! 🚀"
                 ),
                 parse_mode='HTML'
             )
@@ -379,22 +378,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     welcome_message = (
         "🎮 Welcome to LISTO Bot\n\n"
-        "BGMI account screenshots bhejo — main AI se analyze karke ek ready-to-post listing bana dunga.\n\n"
-        "Kaise use kare:\n"
-        "1. BGMI account ka screenshot bhejo\n"
-        "2. AI stats extract karega\n"
-        "3. Formatted listing turant mil jayegi\n\n"
-        "Multiple screenshots ek saath bhej sakte ho — sab ek listing mein combine ho jayenge.\n\n"
-        f"📊 Tujhe rozana <b>{DAILY_FREE_LIMIT} free uses</b> milte hain.\n"
-        f"💡 Refer karo aur <b>+{REFERRAL_BONUS} bonus uses</b> pao — /refer command use karo.\n\n"
-        "Screenshot bhejo aur shuru karo!"
+        "Send your BGMI account screenshots — AI will analyze them and create a ready-to-post listing.\n\n"
+        "How to use:\n"
+        "1. Take a screenshot of your BGMI account\n"
+        "2. AI will extract your stats\n"
+        "3. Get a formatted listing instantly\n\n"
+        "You can send multiple screenshots at once — they'll all be combined into one listing.\n\n"
+        f"📊 You get <b>{DAILY_FREE_LIMIT} free uses</b> every day.\n"
+        f"💡 Refer friends and get <b>+{REFERRAL_BONUS} bonus uses</b> — use /refer command.\n\n"
+        "Send a screenshot to get started!"
     )
     await update.message.reply_text(welcome_message, parse_mode='HTML')
     logger.info(f"User {chat_id} started LISTO bot")
 
 
 async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """User ka referral link dikhao."""
+    """Show user's referral link."""
     chat_id = update.effective_chat.id
     save_user(chat_id)
 
@@ -402,20 +401,20 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ref_count = user.get('referral_count', 0) if user else 0
 
     msg = (
-        f"🔗 Tera Referral Link:\n\n"
+        f"🔗 Your Referral Link:\n\n"
         f"<code>https://t.me/{BOT_USERNAME}?start=ref_{chat_id}</code>\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"📋 Kaise kaam karta hai:\n"
-        f"• Apna link dosto ke saath share karo\n"
-        f"• Jab koi join kare tera link se\n"
-        f"• Tujhe <b>+{REFERRAL_BONUS} bonus uses</b> milenge us din\n\n"
-        f"👥 Abhi tak kitne joined: <b>{ref_count}</b>\n\n"
-        f"Jitne zyada refer, utne zyada uses! 🚀"
+        f"📋 How it works:\n"
+        f"• Share your link with friends\n"
+        f"• When someone joins using your link\n"
+        f"• You get <b>+{REFERRAL_BONUS} bonus uses</b> for that day\n\n"
+        f"👥 Total referrals so far: <b>{ref_count}</b>\n\n"
+        f"More referrals = more uses! 🚀"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Aaj kitne uses bache hain dikhao."""
+    """Show today's remaining uses."""
     chat_id = update.effective_chat.id
     save_user(chat_id)
 
@@ -427,7 +426,7 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user  = get_user(chat_id)
 
     if not user:
-        await update.message.reply_text("❌ Kuch error aaya. Dobara try karo.")
+        await update.message.reply_text("❌ An error occurred. Please try again.")
         return
 
     daily_count = user.get('daily_count', 0)
@@ -448,31 +447,31 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     bar    = "🟩" * filled + "⬜" * empty
 
     if remaining > 0:
-        status = f"✅ <b>{remaining}</b> use bacha aaj ke liye"
+        status = f"✅ <b>{remaining}</b> use(s) remaining today"
     else:
-        status = f"⛔ Limit khatam! Reset: <b>{format_countdown(secs)}</b> mein"
+        status = f"⛔ Limit reached! Resets in: <b>{format_countdown(secs)}</b>"
 
     msg = (
-        "📊 Aaj ka Usage\n\n"
+        "📊 Today's Usage\n\n"
         + bar + "\n"
         + f"Used: <b>{used}/{total_limit}</b>\n\n"
         + status + "\n\n"
         + "━━━━━━━━━━━━━━━\n"
-        + "🔄 Daily reset: raat 12 baje IST\n"
-        + f"💡 Zyada uses chahiye? /refer karo → +{REFERRAL_BONUS} bonus"
+        + "🔄 Daily reset: midnight IST\n"
+        + f"💡 Want more uses? /refer → +{REFERRAL_BONUS} bonus"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Bot ka help guide dikhao."""
+    """Show bot help guide."""
     chat_id = update.effective_chat.id
     save_user(chat_id)
 
     msg = (
         "📖 LISTO Bot — Help\n\n"
-        "🎮 <b>Kya karta hai?</b>\n"
-        "BGMI account screenshots se AI-powered listing banata hai — ready to post!\n\n"
+        "🎮 <b>What does it do?</b>\n"
+        "Creates AI-powered listings from your BGMI account screenshots — ready to post!\n\n"
         "━━━━━━━━━━━━━━━\n"
         "⚡ <b>Commands</b>\n\n"
         "/start — Bot shuru karo\n"
@@ -480,18 +479,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/refer — Referral link lo, dosto ko share karo\n"
         "/help — Ye guide\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "📸 <b>Kaise use kare?</b>\n\n"
-        "1. BGMI account ka screenshot lo\n"
-        "2. Bot ko bhejo (ek ya multiple)\n"
-        "3. AI analyze karega\n"
-        "4. Ready-to-post listing mil jayegi!\n\n"
+        "📸 <b>How to use?</b>\n\n"
+        "1. Take a screenshot of your BGMI account\n"
+        "2. Send it to the bot (one or multiple)\n"
+        "3. AI will analyze it\n"
+        "4. Get your ready-to-post listing!\n\n"
         "━━━━━━━━━━━━━━━\n"
         "📊 <b>Daily Limit</b>\n\n"
-        f"• Rozana <b>{DAILY_FREE_LIMIT} free uses</b> milte hain\n"
-        "• Raat 12 baje IST pe reset hota hai\n"
-        f"• Refer karo → <b>+{REFERRAL_BONUS} bonus uses</b> us din\n\n"
+        f"• <b>{DAILY_FREE_LIMIT} free uses</b> every day\n"
+        "• Resets at midnight IST\n"
+        f"• Refer friends → <b>+{REFERRAL_BONUS} bonus uses</b> that day\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "❓ Koi problem? Screenshot dobara try karo ya thodi der baad aao."
+        "❓ Having issues? Try sending the screenshot again or come back later."
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
@@ -539,7 +538,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await update.message.reply_text(
-        "📸 BGMI account ka screenshot bhejo — main listing bana dunga!"
+        "📸 Send your BGMI account screenshot — I'll create a listing for you!"
     )
     logger.info(f"User {chat_id} sent text")
 
@@ -565,7 +564,7 @@ async def process_group_after_delay(
     try:
         status_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏳ {total} screenshot{'s' if total > 1 else ''} analyze ho raha hai... thoda wait karo"
+            text=f"⏳ Analyzing {total} screenshot{'s' if total > 1 else ''}... please wait"
         )
 
         base64_images = []
@@ -579,17 +578,17 @@ async def process_group_after_delay(
                 logger.error(f"Download error photo {i}: {e}")
 
         if not base64_images:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Screenshots download nahi ho sake. Dobara try karo.")
+            await context.bot.send_message(chat_id=chat_id, text="❌ Could not download screenshots. Please try again.")
             return
 
         try:
             listing = await analyze_image_with_freemodel(base64_images)
         except httpx.HTTPStatusError as e:
             logger.error(f"FreeModel API error: {e.response.status_code} — {e.response.text}")
-            listing = "❌ AI API error. Thodi der baad dobara try karo."
+            listing = "❌ AI API error. Please try again later."
         except Exception as e:
             logger.error(f"Analysis error: {e}")
-            listing = "❌ Screenshot analyze nahi ho saka. Dobara try karo."
+            listing = "❌ Could not analyze screenshot. Please try again."
 
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
@@ -601,7 +600,7 @@ async def process_group_after_delay(
     except Exception as e:
         logger.error(f"Batch unexpected error: {e}")
         try:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Kuch error aaya. Dobara try karo.")
+            await context.bot.send_message(chat_id=chat_id, text="❌ An error occurred. Please try again.")
         except TelegramError:
             pass
 
@@ -612,7 +611,7 @@ async def process_single_photo(
     remaining: int
 ) -> None:
     try:
-        status_msg   = await update.message.reply_text("⏳ Screenshot analyze ho raha hai... thoda wait karo")
+        status_msg   = await update.message.reply_text("⏳ Analyzing screenshot... please wait")
         photo_file   = await update.message.photo[-1].get_file()
         photo_bytes  = await photo_file.download_as_bytearray()
         base64_image = base64.standard_b64encode(bytes(photo_bytes)).decode('utf-8')
@@ -632,9 +631,9 @@ async def process_single_photo(
             secs = seconds_until_midnight_ist()
             footer = (
                 f"\n\n━━━━━━━━━━━━━━━\n"
-                f"⚠️ Aaj ki aakhri use thi!\n"
-                f"🔄 Reset: <b>{format_countdown(secs)}</b> mein\n"
-                f"💡 Refer karo → +{REFERRAL_BONUS} uses: /refer"
+                f"⚠️ That was your last use for today!\n"
+                f"🔄 Resets in: <b>{format_countdown(secs)}</b>\n"
+                f"💡 Refer friends → +{REFERRAL_BONUS} uses: /refer"
             )
         elif remaining <= 1:
             footer = f"\n\n⚠️ Sirf <b>{remaining}</b> use bacha aaj ke liye."
@@ -643,10 +642,10 @@ async def process_single_photo(
 
     except httpx.HTTPStatusError as e:
         logger.error(f"FreeModel API error: {e.response.status_code} — {e.response.text}")
-        await update.message.reply_text("❌ AI API error. Thodi der baad dobara try karo.")
+        await update.message.reply_text("❌ AI API error. Please try again later.")
     except Exception as e:
         logger.error(f"Single photo error: {e}")
-        await update.message.reply_text("❌ Screenshot analyze nahi ho saka. Dobara try karo.")
+        await update.message.reply_text("❌ Could not analyze screenshot. Please try again.")
 
 
 async def send_listing(
@@ -661,9 +660,9 @@ async def send_listing(
         secs = seconds_until_midnight_ist()
         footer = (
             f"\n\n━━━━━━━━━━━━━━━\n"
-            f"⚠️ Aaj ki aakhri use thi!\n"
-            f"🔄 Reset: <b>{format_countdown(secs)}</b> mein\n"
-            f"💡 Refer karo → +{REFERRAL_BONUS} uses: /refer"
+            f"⚠️ That was your last use for today!\n"
+            f"🔄 Resets in: <b>{format_countdown(secs)}</b>\n"
+            f"💡 Refer friends → +{REFERRAL_BONUS} uses: /refer"
         )
     elif remaining <= 1:
         footer = f"\n\n⚠️ Sirf <b>{remaining}</b> use bacha aaj ke liye."
@@ -696,7 +695,7 @@ async def send_listing(
 # ── FreeModel API ────────────────────────────────────────────
 
 async def analyze_image_with_freemodel(base64_images: list) -> str:
-    """FreeModel ke free vision model se images analyze karo."""
+    """Analyze images using FreeModel vision model."""
     url = "https://api.freemodel.dev/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {FREEMODEL_API_KEY}",
@@ -740,11 +739,11 @@ def main() -> None:
     logger.info(f"Mode   : {BOT_MODE.upper()}")
 
     if is_maintenance():
-        logger.info("MAINTENANCE MODE active — bot offline")
+        logger.info("MAINTENANCE MODE — bot offline")
     elif is_broadcast_enabled():
-        logger.info("START MODE — broadcast on startup enabled")
+        logger.info("START MODE — broadcasting on startup")
     else:
-        logger.info("PAUSE MODE — bot active, broadcast disabled")
+        logger.info("PAUSE MODE — bot active, no broadcast")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app_ref = application
