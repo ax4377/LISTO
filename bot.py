@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN  = os.getenv('TELEGRAM_BOT_TOKEN')
 FREEMODEL_API_KEY   = os.getenv('FREEMODEL_API_KEY')
-FREEMODEL_MODEL     = os.getenv('FREEMODEL_MODEL', 'google/gemma-4-31b-it:free')
+FREEMODEL_MODEL     = os.getenv('FREEMODEL_MODEL')
 BOT_MODE            = os.getenv('BOT_MODE', 'start').strip().lower()
 SUPABASE_URL        = os.getenv('SUPABASE_URL')
 SUPABASE_KEY        = os.getenv('SUPABASE_KEY')
