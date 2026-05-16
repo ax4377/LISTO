@@ -20,16 +20,16 @@ logger = logging.getLogger(__name__)
 # ── Environment variables ─────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN  = os.getenv('TELEGRAM_BOT_TOKEN')
-OPENROUTER_API_KEY  = os.getenv('OPENROUTER_API_KEY')
-OPENROUTER_MODEL    = os.getenv('OPENROUTER_MODEL', 'google/gemma-4-31b-it:free')
+FREEMODEL_API_KEY   = os.getenv('FREEMODEL_API_KEY')
+FREEMODEL_MODEL     = os.getenv('FREEMODEL_MODEL', 'google/gemma-4-31b-it:free')
 BOT_MODE            = os.getenv('BOT_MODE', 'start').strip().lower()
 SUPABASE_URL        = os.getenv('SUPABASE_URL')
 SUPABASE_KEY        = os.getenv('SUPABASE_KEY')
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("Missing: TELEGRAM_BOT_TOKEN")
-if not OPENROUTER_API_KEY:
-    raise ValueError("Missing: OPENROUTER_API_KEY")
+if not FREEMODEL_API_KEY:
+    raise ValueError("Missing: FREEMODEL_API_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Missing: SUPABASE_URL or SUPABASE_KEY")
 
@@ -208,9 +208,9 @@ async def process_group_after_delay(media_group_id: str, chat_id: int, context: 
             return
 
         try:
-            listing = await analyze_image_with_openrouter(base64_images)
+            listing = await analyze_image_with_freemodel(base64_images)
         except httpx.HTTPStatusError as e:
-            logger.error(f"OpenRouter API error: {e.response.status_code} — {e.response.text}")
+            logger.error(f"FreeModel API error: {e.response.status_code} — {e.response.text}")
             listing = "❌ AI API error. Thodi der baad dobara try karo."
         except Exception as e:
             logger.error(f"Analysis error: {e}")
@@ -240,7 +240,7 @@ async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
         logger.info(f"Single photo: {len(photo_bytes)} bytes")
 
-        listing = await analyze_image_with_openrouter([base64_image])
+        listing = await analyze_image_with_freemodel([base64_image])
 
         try:
             await status_msg.delete()
@@ -250,7 +250,7 @@ async def process_single_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(listing, parse_mode='HTML')
 
     except httpx.HTTPStatusError as e:
-        logger.error(f"OpenRouter API error: {e.response.status_code} — {e.response.text}")
+        logger.error(f"FreeModel API error: {e.response.status_code} — {e.response.text}")
         await update.message.reply_text("❌ AI API error. Thodi der baad dobara try karo.")
     except Exception as e:
         logger.error(f"Single photo error: {e}")
@@ -276,13 +276,13 @@ async def send_listing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing
         await context.bot.send_message(chat_id=chat_id, text=current.strip(), parse_mode='HTML')
 
 
-# ── OpenRouter API ────────────────────────────────────────────
+# ── FreeModel API ────────────────────────────────────────────
 
-async def analyze_image_with_openrouter(base64_images: list) -> str:
-    """OpenRouter ke free vision model se images analyze karo."""
-    url = "https://api.freemodel.dev"
+async def analyze_image_with_freemodel(base64_images: list) -> str:
+    """FreeModel ke free vision model se images analyze karo."""
+    url = "https://api.freemodel.dev/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {FREEMODEL_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/listo-bot",
         "X-Title": "LISTO Bot",
@@ -296,7 +296,7 @@ async def analyze_image_with_openrouter(base64_images: list) -> str:
         })
 
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": FREEMODEL_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 4096,
         "temperature": 0.15,
@@ -307,7 +307,7 @@ async def analyze_image_with_openrouter(base64_images: list) -> str:
         response.raise_for_status()
         data    = response.json()
         listing = data['choices'][0]['message']['content'].strip()
-        logger.info(f"OpenRouter response: {len(listing)} chars | model: {OPENROUTER_MODEL} | images: {len(base64_images)}")
+        logger.info(f"FreeModel response: {len(listing)} chars | model: {FREEMODEL_MODEL} | images: {len(base64_images)}")
         return listing
 
 
@@ -315,7 +315,7 @@ async def analyze_image_with_openrouter(base64_images: list) -> str:
 
 def main() -> None:
     logger.info("Starting LISTO bot")
-    logger.info(f"Model  : {OPENROUTER_MODEL}")
+    logger.info(f"Model  : {FREEMODEL_MODEL}")
     logger.info(f"Mode   : {BOT_MODE.upper()}")
 
     if is_maintenance():

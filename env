@@ -1,3 +1,6 @@
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-NVIDIA_API_KEY=your_nvidia_api_key_here
-NVIDIA_MODEL=mistralai/mistral-large-3-675b-instruct-2512
+FREEMODEL_API_KEY=your_freemodel_api_key_here
+FREEMODEL_MODEL=google/gemma-4-31b-it:free
+SUPABASE_URL=your_supabase_url_here
+SUPABASE_KEY=your_supabase_key_here
+BOT_MODE=start
