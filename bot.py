@@ -414,6 +414,88 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
+async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Aaj kitne uses bache hain dikhao."""
+    chat_id = update.effective_chat.id
+    save_user(chat_id)
+
+    if is_maintenance():
+        await update.message.reply_text(MAINTENANCE_MESSAGE)
+        return
+
+    today = get_ist_today()
+    user  = get_user(chat_id)
+
+    if not user:
+        await update.message.reply_text("❌ Kuch error aaya. Dobara try karo.")
+        return
+
+    daily_count = user.get('daily_count', 0)
+    last_date   = user.get('last_used_date')
+    bonus_uses  = user.get('bonus_uses', 0)
+
+    if last_date != today:
+        daily_count = 0
+        bonus_uses  = 0
+
+    total_limit = DAILY_FREE_LIMIT + bonus_uses
+    used        = daily_count
+    remaining   = max(0, total_limit - used)
+    secs        = seconds_until_midnight_ist()
+
+    filled = min(used, total_limit)
+    empty  = total_limit - filled
+    bar    = "🟩" * filled + "⬜" * empty
+
+    if remaining > 0:
+        status = f"✅ <b>{remaining}</b> use bacha aaj ke liye"
+    else:
+        status = f"⛔ Limit khatam! Reset: <b>{format_countdown(secs)}</b> mein"
+
+    msg = (
+        "📊 Aaj ka Usage\n\n"
+        + bar + "\n"
+        + f"Used: <b>{used}/{total_limit}</b>\n\n"
+        + status + "\n\n"
+        + "━━━━━━━━━━━━━━━\n"
+        + "🔄 Daily reset: raat 12 baje IST\n"
+        + f"💡 Zyada uses chahiye? /refer karo → +{REFERRAL_BONUS} bonus"
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bot ka help guide dikhao."""
+    chat_id = update.effective_chat.id
+    save_user(chat_id)
+
+    msg = (
+        "📖 LISTO Bot — Help\n\n"
+        "🎮 <b>Kya karta hai?</b>\n"
+        "BGMI account screenshots se AI-powered listing banata hai — ready to post!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "⚡ <b>Commands</b>\n\n"
+        "/start — Bot shuru karo\n"
+        "/limit — Aaj kitne uses bache hain dekho\n"
+        "/refer — Referral link lo, dosto ko share karo\n"
+        "/help — Ye guide\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📸 <b>Kaise use kare?</b>\n\n"
+        "1. BGMI account ka screenshot lo\n"
+        "2. Bot ko bhejo (ek ya multiple)\n"
+        "3. AI analyze karega\n"
+        "4. Ready-to-post listing mil jayegi!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📊 <b>Daily Limit</b>\n\n"
+        f"• Rozana <b>{DAILY_FREE_LIMIT} free uses</b> milte hain\n"
+        "• Raat 12 baje IST pe reset hota hai\n"
+        f"• Refer karo → <b>+{REFERRAL_BONUS} bonus uses</b> us din\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "❓ Koi problem? Screenshot dobara try karo ya thodi der baad aao."
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -669,6 +751,8 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("refer", refer_command))
+    application.add_handler(CommandHandler("limit", limit_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
