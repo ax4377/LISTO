@@ -280,7 +280,7 @@ async def send_listing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, listing
 
 async def analyze_image_with_openrouter(base64_images: list) -> str:
     """OpenRouter ke free vision model se images analyze karo."""
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = "https://api.freemodel.dev"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
