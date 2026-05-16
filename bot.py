@@ -250,6 +250,10 @@ def apply_referral_bonus(referrer_chat_id: int) -> None:
 def is_maintenance() -> bool:
     return BOT_MODE == 'stop'
 
+def is_broadcast_enabled() -> bool:
+    """Sirf BOT_MODE=start pe broadcast hoga. pause/stop pe nahi."""
+    return BOT_MODE == 'start'
+
 
 # ── Limit exceeded message ────────────────────────────────────
 
@@ -654,9 +658,11 @@ def main() -> None:
     logger.info(f"Mode   : {BOT_MODE.upper()}")
 
     if is_maintenance():
-        logger.info("MAINTENANCE MODE active")
+        logger.info("MAINTENANCE MODE active — bot offline")
+    elif is_broadcast_enabled():
+        logger.info("START MODE — broadcast on startup enabled")
     else:
-        logger.info("ACTIVE MODE — will broadcast on startup")
+        logger.info("PAUSE MODE — bot active, broadcast disabled")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app_ref = application
@@ -667,10 +673,12 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     async def post_init(app: Application) -> None:
-        if not is_maintenance():
+        # Sirf BOT_MODE=start pe hi broadcast hoga
+        if is_broadcast_enabled():
             await broadcast_active(app)
-        # Midnight reset scheduler start karo
-        asyncio.create_task(schedule_midnight_reset(app))
+        # Midnight reset scheduler — maintenance mode mein nahi chalega
+        if not is_maintenance():
+            asyncio.create_task(schedule_midnight_reset(app))
 
     application.post_init = post_init
     application.run_polling(drop_pending_updates=True)
