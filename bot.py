@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN  = os.getenv('TELEGRAM_BOT_TOKEN')
 FREEMODEL_API_KEY   = os.getenv('FREEMODEL_API_KEY')
-FREEMODEL_MODEL     = os.getenv('FREEMODEL_MODEL')
+FREEMODEL_MODEL     = os.getenv('FREEMODEL_MODEL', 'google/gemma-4-31b-it:free')
 BOT_MODE            = os.getenv('BOT_MODE', 'start').strip().lower()
 SUPABASE_URL        = os.getenv('SUPABASE_URL')
 SUPABASE_KEY        = os.getenv('SUPABASE_KEY')
@@ -413,6 +413,54 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only — show bot stats."""
+    chat_id = update.effective_chat.id
+
+    if chat_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+
+    try:
+        today = get_ist_today()
+
+        # Total users
+        total_result = supabase.table('listo_users').select('chat_id', count='exact').execute()
+        total_users  = total_result.count or 0
+
+        # Active today (used at least once)
+        active_result = supabase.table('listo_users').select('chat_id', count='exact').eq('last_used_date', today).execute()
+        active_today  = active_result.count or 0
+
+        # Total uses today
+        uses_result = supabase.table('listo_users').select('daily_count').eq('last_used_date', today).execute()
+        total_uses_today = sum(row.get('daily_count', 0) for row in uses_result.data)
+
+        # Users who hit limit today
+        exhausted = get_users_with_exhausted_limit()
+        limit_hit_today = len(exhausted)
+
+        # Total referrals ever
+        ref_result = supabase.table('listo_users').select('referral_count').execute()
+        total_referrals = sum(row.get('referral_count', 0) for row in ref_result.data)
+
+        msg = (
+            f"📊 <b>LISTO Bot — Stats</b>\n\n"
+            f"👥 <b>Total Users:</b> {total_users:,}\n"
+            f"🟢 <b>Active Today:</b> {active_today:,}\n"
+            f"⚡ <b>Total Uses Today:</b> {total_uses_today:,}\n"
+            f"⛔ <b>Limit Hit Today:</b> {limit_hit_today:,}\n"
+            f"🔗 <b>Total Referrals:</b> {total_referrals:,}\n\n"
+            f"🗓 Date: <code>{today}</code>"
+        )
+        await update.message.reply_text(msg, parse_mode='HTML')
+
+    except Exception as e:
+        logger.error(f"Stats command error: {e}")
+        await update.message.reply_text("❌ Could not fetch stats. Try again.")
+
+
 async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show today's remaining uses."""
     chat_id = update.effective_chat.id
@@ -749,6 +797,7 @@ def main() -> None:
     app_ref = application
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("refer", refer_command))
     application.add_handler(CommandHandler("limit", limit_command))
     application.add_handler(CommandHandler("help", help_command))
